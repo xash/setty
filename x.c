@@ -93,6 +93,7 @@ typedef struct {
 	Window win;
 	Drawable buf;
 	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
+	int *ws; /* width for each spec */
 	Atom xembed, wmdeletewin, netwmname, netwmpid;
 	XIM xim;
 	XIC xic;
@@ -139,7 +140,7 @@ typedef struct {
 static inline ushort sixd_to_16bit(int);
 static int xmakeglyphfontspecs(XftGlyphFontSpec *, const Glyph *, int, int, int);
 static void xdrawglyphfontspecs(const XftGlyphFontSpec *, Glyph, int, int, int);
-static void xdrawglyph(Glyph, int, int);
+static void xdrawglyph(Line, Glyph, int, int);
 static void xclear(int, int, int, int);
 static int xgeommasktogravity(int);
 static void ximopen(Display *);
@@ -325,9 +326,13 @@ ttysend(const Arg *arg)
 int
 evcol(XEvent *e)
 {
-	int x = e->xbutton.x - borderpx;
+	int x = e->xbutton.x - borderpx, y = evrow(e), x1;
 	LIMIT(x, 0, win.tw - 1);
-	return x / win.cw;
+	for (x1 = 1; x1 + 1 < win.tw / win.cw; x1++) {
+		if (xw.specbuf[y * (win.tw / win.cw) + x1].x > x)
+			break;
+	}
+	return x1 - 1;
 }
 
 int
@@ -719,7 +724,8 @@ xresize(int col, int row)
 	xclear(0, 0, win.w, win.h);
 
 	/* resize to new width */
-	xw.specbuf = xrealloc(xw.specbuf, col * sizeof(GlyphFontSpec));
+	xw.specbuf = xrealloc(xw.specbuf, col * row * sizeof(GlyphFontSpec));
+	xw.ws = xrealloc(xw.ws, col * row * sizeof(*xw.ws));
 }
 
 ushort
@@ -1117,7 +1123,8 @@ xinit(int cols, int rows)
 	XFillRectangle(xw.dpy, xw.buf, dc.gc, 0, 0, win.w, win.h);
 
 	/* font spec buffer */
-	xw.specbuf = xmalloc(cols * sizeof(GlyphFontSpec));
+	xw.specbuf = xmalloc(cols * rows * sizeof(GlyphFontSpec));
+	xw.ws = xmalloc(cols * rows * sizeof(*xw.ws));
 
 	/* Xft rendering context */
 	xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.cmap);
@@ -1170,18 +1177,21 @@ xinit(int cols, int rows)
 int
 xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x, int y)
 {
-	float winx = borderpx + x * win.cw, winy = borderpx + y * win.ch, xp, yp;
+	float winx = borderpx, winy = borderpx + y * win.ch, xp, yp;
 	ushort mode, prevmode = USHRT_MAX;
 	Font *font = &dc.font;
 	int frcflags = FRC_NORMAL;
-	float runewidth = win.cw;
+	float runewidth = 1;
 	Rune rune;
 	FT_UInt glyphidx;
 	FcResult fcres;
 	FcPattern *fcpattern, *fontpattern;
 	FcFontSet *fcsets[] = { NULL };
 	FcCharSet *fccharset;
-	int i, f, numspecs = 0;
+	XGlyphInfo extents;
+	int i, f, numspecs = 0, *ws = xw.ws + y * (win.tw / win.cw) + x;
+	if (x)
+    	winx += specs[-1].x + ws[-1];
 
 	for (i = 0, xp = winx, yp = winy + font->ascent; i < len; ++i) {
 		/* Fetch rune and mode for current glyph. */
@@ -1197,7 +1207,7 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 			prevmode = mode;
 			font = &dc.font;
 			frcflags = FRC_NORMAL;
-			runewidth = win.cw * ((mode & ATTR_WIDE) ? 2.0f : 1.0f);
+			runewidth = (mode & ATTR_WIDE) ? 2.0f : 1.0f;
 			if ((mode & ATTR_ITALIC) && (mode & ATTR_BOLD)) {
 				font = &dc.ibfont;
 				frcflags = FRC_ITALICBOLD;
@@ -1218,7 +1228,9 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 			specs[numspecs].glyph = glyphidx;
 			specs[numspecs].x = (short)xp;
 			specs[numspecs].y = (short)yp;
-			xp += runewidth;
+			XftGlyphExtents(xw.dpy, specs[numspecs].font, &glyphidx, 1, &extents);
+			xp += extents.xOff * runewidth;
+			*ws++ = extents.xOff * runewidth;
 			numspecs++;
 			continue;
 		}
@@ -1292,7 +1304,9 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 		specs[numspecs].glyph = glyphidx;
 		specs[numspecs].x = (short)xp;
 		specs[numspecs].y = (short)yp;
-		xp += runewidth;
+		XftGlyphExtents(xw.dpy, specs[numspecs].font, &glyphidx, 1, &extents);
+		xp += extents.xOff * runewidth;
+		*ws++ = extents.xOff * runewidth;
 		numspecs++;
 	}
 
@@ -1303,11 +1317,14 @@ void
 xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, int y)
 {
 	int charlen = len * ((base.mode & ATTR_WIDE) ? 2 : 1);
-	int winx = borderpx + x * win.cw, winy = borderpx + y * win.ch,
-	    width = charlen * win.cw;
+	int px = specs[0].x;
+	int winx = borderpx + px, winy = borderpx + y * win.ch, width;
 	Color *fg, *bg, *temp, revfg, revbg, truefg, truebg;
 	XRenderColor colfg, colbg;
 	XRectangle r;
+	XGlyphInfo extents;
+
+	width = specs[len - 1].x + xw.ws[y * (win.tw / win.cw) + x + len - 1] - px;
 
 	/* Fallback on color display for attributes not supported by the font */
 	if (base.mode & ATTR_ITALIC && base.mode & ATTR_BOLD) {
@@ -1406,6 +1423,10 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	if (winy + win.ch >= borderpx + win.th)
 		xclear(winx, winy + win.ch, winx + width, win.h);
 
+	/* If drawing last char in line, clear everything to the right */
+	if (x + len == win.tw / win.cw)
+		xclear(winx, y * win.ch + borderpx, win.w, y * win.ch + borderpx + win.ch);
+
 	/* Clean up the region we want to draw to. */
 	XftDrawRect(xw.draw, bg, winx, winy, width, win.ch);
 
@@ -1435,24 +1456,31 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 }
 
 void
-xdrawglyph(Glyph g, int x, int y)
+xdrawglyph(Line line, Glyph g, int x, int y)
 {
-	int numspecs;
-	XftGlyphFontSpec spec;
+	int numspecs, ox = xw.ws[y * (win.tw / win.cw) + x];
+	XftGlyphFontSpec *spec = xw.specbuf + y * (win.tw / win.cw) + x;
 
-	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
-	xdrawglyphfontspecs(&spec, g, numspecs, x, y);
+	numspecs = xmakeglyphfontspecs(spec, &g, 1, x, y);
+	xdrawglyphfontspecs(spec, g, numspecs, x, y);
+	if (x < win.tw / win.cw &&
+	    ox != xw.ws[y * (win.tw / win.cw) + x])
+		xdrawline(line, x + 1, y, win.tw / win.cw);
 }
 
 void
-xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
+xdrawcursor(int cx, int cy, Line line, int ox, int oy, Line oline)
 {
 	Color drawcol;
+	Glyph g = line[cx], og = oline[ox];
+	int x = xw.specbuf[cy * (win.tw / win.cw) + cx].x;
+	int width = (cx < win.tw / win.cw ?
+	             xw.specbuf[cy * (win.tw / win.cw) + cx + 1].x : win.tw) - x;
 
 	/* remove the old cursor */
 	if (selected(ox, oy))
 		og.mode ^= ATTR_REVERSE;
-	xdrawglyph(og, ox, oy);
+	xdrawglyph(oline, og, ox, oy);
 
 	if (IS_SET(MODE_HIDE))
 		return;
@@ -1491,41 +1519,41 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		case 0: /* Blinking Block */
 		case 1: /* Blinking Block (Default) */
 		case 2: /* Steady Block */
-			xdrawglyph(g, cx, cy);
+			xdrawglyph(line, g, cx, cy);
 			break;
 		case 3: /* Blinking Underline */
 		case 4: /* Steady Underline */
 			XftDrawRect(xw.draw, &drawcol,
-					borderpx + cx * win.cw,
+					borderpx + x,
 					borderpx + (cy + 1) * win.ch - \
 						cursorthickness,
-					win.cw, cursorthickness);
+					width, cursorthickness);
 			break;
 		case 5: /* Blinking bar */
 		case 6: /* Steady bar */
 			XftDrawRect(xw.draw, &drawcol,
-					borderpx + cx * win.cw,
+					borderpx + x,
 					borderpx + cy * win.ch,
 					cursorthickness, win.ch);
 			break;
 		}
 	} else {
 		XftDrawRect(xw.draw, &drawcol,
-				borderpx + cx * win.cw,
+				borderpx + x,
 				borderpx + cy * win.ch,
-				win.cw - 1, 1);
+				width > 0 ? width - 1 : 1, 1);
 		XftDrawRect(xw.draw, &drawcol,
-				borderpx + cx * win.cw,
-				borderpx + cy * win.ch,
-				1, win.ch - 1);
-		XftDrawRect(xw.draw, &drawcol,
-				borderpx + (cx + 1) * win.cw - 1,
+				borderpx + x,
 				borderpx + cy * win.ch,
 				1, win.ch - 1);
 		XftDrawRect(xw.draw, &drawcol,
-				borderpx + cx * win.cw,
+				borderpx + x + width,
+				borderpx + cy * win.ch,
+				1, win.ch - 1);
+		XftDrawRect(xw.draw, &drawcol,
+				borderpx + x,
 				borderpx + (cy + 1) * win.ch - 1,
-				win.cw, 1);
+				width, 1);
 	}
 }
 
@@ -1562,7 +1590,7 @@ xdrawline(Line line, int x1, int y1, int x2)
 {
 	int i, x, ox, numspecs;
 	Glyph base, new;
-	XftGlyphFontSpec *specs = xw.specbuf;
+	XftGlyphFontSpec *specs = xw.specbuf + y1 * (win.tw/win.cw) + x1;
 
 	numspecs = xmakeglyphfontspecs(specs, &line[x1], x2 - x1, x1, y1);
 	i = ox = 0;
