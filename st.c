@@ -2099,7 +2099,8 @@ tcontrolcode(uchar ascii)
 {
 	switch (ascii) {
 	case '\t':   /* HT */
-		tputtab(1);
+		/* tputtab(1); */
+		tstrsequence('\t');
 		return;
 	case '\b':   /* BS */
 		tmoveto(term.c.x-1, term.c.y);
@@ -2285,7 +2286,7 @@ tputc(Rune u)
 	int width, len;
 	Glyph *gp;
 
-	control = ISCONTROL(u);
+	control = ISCONTROL(u) && u != '\t';
 	if (!IS_SET(MODE_UTF8) && !IS_SET(MODE_SIXEL)) {
 		c[0] = u;
 		width = len = 1;
@@ -2543,13 +2544,108 @@ resettitle(void)
 	xsettitle(NULL);
 }
 
+int
+alignmenttype(int x, int y)
+{
+	if (x >= 1 &&
+	    term.line[y][x - 1].bg != term.line[y][x].bg)
+		return 1;
+	if (x >= 2 &&
+	    (term.line[y][x - 2].u == ' ' &&
+	     term.line[y][x - 1].u == '/' &&
+	     term.line[y][x    ].u == '*') ||
+	    (term.line[y][x - 2].u == ' ' &&
+	     term.line[y][x - 1].u == ' ' &&
+	     term.line[y][x    ].u == '*'))
+		return 3;
+	if (term.line[y][x].u >= 0x2500 && term.line[y][x].u <= 0x2570)
+		return 4;
+	if (term.line[y][x].u == '|') return 4;
+	if (term.line[y][x].u == '{') return 6;
+	if (term.line[y][x].u == '}') return 7;
+	if (term.line[y][x].u == '=') return 8;
+	if (term.line[y][x].u == '+') return 9;
+	if (term.line[y][x].u == '#') return 10;
+	if (term.line[y][x].u == '[') return 11;
+	if (term.line[y][x].u == ']') return 12;
+	if (x >= 2 &&
+		term.line[y][x - 2].u == ' ' &&
+	    term.line[y][x - 1].u == ' ' &&
+	    term.line[y][x    ].u != ' ')
+		return 2;
+	return 0;
+}
+
+
+
 void
 drawregion(int x1, int y1, int x2, int y2)
 {
-	int y;
+	int y, yn, done, x, a;
+	int xs[100] = { 0 };
+
+	/* set xft glyphs */
 	for (y = y1; y < y2; y++) {
+		xs[y] = x1;
+		/* TODO: become lazy again
 		if (!term.dirty[y])
 			continue;
+		*/
+
+		xspecline(term.line[y], xs[y], y, x2);
+	}
+
+	/* align for literal tabs */
+	done = 0;
+	while (!done) {
+		for (y = y1; y < y2; y++) {
+			for (; xs[y] < x2; xs[y]++) {
+				if (term.line[y][xs[y]].u == '\t') {
+					xs[y]++;
+					break;
+				}
+			}
+		}
+
+		done = 1;
+		for (y = y1; y < y2; y++) {
+			if (xs[y] >= x2) continue;
+			done = 0;
+
+			for (yn = y + 1; yn < y2; yn++) {
+				if (xs[yn] >= x2) break;
+			}
+
+			xalign(term.dirty, xs + y, y, yn - y);
+
+			y = yn - 1;
+		}
+	}
+
+	/* align for mono-spaced alignment */
+	for (x = x1; x < x2; x++) {
+		for (y = y1; y < y2; y++) {
+			a = alignmenttype(x, y);
+			if (!a) continue;
+			xs[y] = x;
+
+			for (yn = y + 1; yn < y2; yn++) {
+				if (a != alignmenttype(x, yn)) break;
+				xs[yn] = x;
+			}
+
+			if (yn - y < 2) continue;
+			xalign(term.dirty, xs + y, y, yn - y);
+			y = yn - 1;
+		}
+	}
+
+
+	for (y = y1; y < y2; y++) {
+		/* TODO: become lazy again
+		if (!term.dirty[y])
+			continue;
+		*/
 
 		term.dirty[y] = 0;
 		xdrawline(term.line[y], x1, y, x2);

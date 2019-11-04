@@ -1196,6 +1196,7 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 	for (i = 0, xp = winx, yp = winy + font->ascent; i < len; ++i) {
 		/* Fetch rune and mode for current glyph. */
 		rune = glyphs[i].u;
+		if (rune == '\t') rune = ' ';
 		mode = glyphs[i].mode;
 
 		/* Skip dummy wide-character spacing. */
@@ -1586,13 +1587,46 @@ xstartdraw(void)
 }
 
 void
+xspecline(Line line, int x1, int y1, int x2)
+{
+	XftGlyphFontSpec *specs = xw.specbuf + y1 * (win.tw / win.cw) + x1;
+
+	xmakeglyphfontspecs(specs, &line[x1], x2 - x1, x1, y1);
+}
+
+void
+xalign(int *dirty, int *xs, int y, int c)
+{
+    int mx = 0, cx, i, x, diff;
+    XftGlyphFontSpec *spec;
+
+    for (i = 0; i < c; i++) {
+        cx = xw.specbuf[(y + i) * (win.tw / win.cw) + xs[i]].x;
+        mx = mx > cx ? mx : cx;
+    }
+
+    for (i = 0; i < c; i++) {
+        spec = xw.specbuf + (y + i) * (win.tw / win.cw) + xs[i];
+		if (spec->x > mx)
+    		continue;
+		dirty[y + i] = 1;
+		diff = mx - spec->x;
+		if (xs[i])
+    		xw.ws[(y + i) * (win.tw / win.cw) + xs[i] - 1] += diff;
+		for (x = xs[i]; x < win.tw / win.cw; x++)
+    		(spec++)->x += diff;
+    }
+}
+
+void
 xdrawline(Line line, int x1, int y1, int x2)
 {
 	int i, x, ox, numspecs;
 	Glyph base, new;
-	XftGlyphFontSpec *specs = xw.specbuf + y1 * (win.tw/win.cw) + x1;
+	XftGlyphFontSpec *specs = xw.specbuf + y1 * (win.tw / win.cw) + x1;
 
-	numspecs = xmakeglyphfontspecs(specs, &line[x1], x2 - x1, x1, y1);
+	/* will fail with ATTR_WIDE */
+	numspecs = x2 - x1;
 	i = ox = 0;
 	for (x = x1; x < x2 && i < numspecs; x++) {
 		new = line[x];
