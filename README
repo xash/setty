@@ -1,28 +1,29 @@
-st - simple terminal
---------------------
+setty - simple elastic tabstops terminal? why?
+----------------------------------------------
+setty is a st fork with elastic tabstops and proportional font support.
 st is a simple terminal emulator for X which sucks less.
 
 
 Requirements
 ------------
-In order to build st you need the Xlib header files.
+In order to build setty you need the Xlib header files.
 
 
 Installation
 ------------
-Edit config.mk to match your local setup (st is installed into
+Edit config.mk to match your local setup (setty is installed into
 the /usr/local namespace by default).
 
-Afterwards enter the following command to build and install st (if
+Afterwards enter the following command to build and install setty (if
 necessary as root):
 
     make clean install
 
 
-Running st
-----------
-If you did not install st with make clean install, you must compile
-the st terminfo entry with the following command:
+Running setty
+-------------
+If you did not install setty with make clean install, you must compile
+the setty terminfo entry with the following command:
 
     tic -sx st.info
 
